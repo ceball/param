@@ -1065,3 +1065,198 @@ class Foldername(Path):
             return resolve_path(path, path_to_file=False, search_paths=self.search_paths)
         else:
             return resolve_path(path, path_to_file=False)       
+
+
+
+
+
+# CEBALERT: This singleton-producing mechanism is pretty complicated,
+# and it would be great if someone could simplify it. Getting all of
+# the behavior we want for e.g. Simulation is tricky, but there are
+# tests for it. Note that:
+# (1) There should only ever be one single Simulation instance for
+#     which register is True. Creating, copying, and unpickling
+#     need to take this into account.
+# (2) A Simulation instance for which register is False should
+#     behave the same as any normal Python object.
+#
+# For how to use, see topo.base.simulation.Simulation or
+# topo.misc.commandline.GlobalParams.
+class OptionalSingleton(object):
+
+    _inst = None
+
+    def __new__(cls,singleton):
+        """
+        Return the single instance stored in _inst if singleton is
+        True; otherwise, return a new instance.
+        """
+        if singleton:
+            if cls is not type(cls._inst):
+                cls._inst = object.__new__(cls)
+                cls._inst._singleton = True
+            return cls._inst
+        else:
+            new_inst = object.__new__(cls)
+            new_inst._singleton = False
+            return new_inst
+
+    def __getnewargs__(self):
+        return (self._singleton,)
+
+    def __copy__(self):
+        # An OptionalSingleton(singleton=False) instance is copied, while the
+        # OptionalSingleton(singleton=True) instance is not copied.
+        if self._singleton:
+            return self
+        else:
+            # Ideally we'd just call "object.__copy__", but apparently
+            # there's no such method.
+
+            # CB: I *think* this is how to do a copy. Any better
+            # ideas?  Python's copy.copy() function calls an object's
+            # __reduce__ method and then reconstructs the object from
+            # that using copy._reconstruct().
+            new_obj = self.__class__(self._singleton)
+            new_obj.__dict__ = copy(self.__dict__)
+            return new_obj
+
+    def __deepcopy__(self,m):
+        if self._singleton:
+            return self
+        else:
+            new_obj = self.__class__(self._singleton)
+            new_obj.__dict__ = deepcopy(self.__dict__,m)
+            return new_obj
+
+    # CB: I might have bound __copy__ (& __deepcopy__) just to the
+    # Simulation(singleton=True) instance to avoid the Simulation
+    # class having a __copy__ method at all, but copy() only checks
+    # the *class* for the existence of __copy__.
+
+
+import __main__
+
+class GlobalParams(Parameterized,OptionalSingleton):
+    """
+    A Parameterized class providing script-level parameters.
+
+    Script-level parameters can be set from the commandline by passing
+    via -p, e.g. ./topographica -p retina_density=10
+
+    Within scripts, parameters can be declared by using the add()
+    method.
+
+
+    Example usage in a script:
+
+    from topo.misc.commandline import global_params as p
+    p.add(
+        retina_density=param.Number(default=24.0,bounds=(0,None),
+        inclusive_bounds=(False,True),doc=\"""
+        The nominal_density to use for the retina.\"""))
+    ...
+    topo.sim['Retina']=sheet.GeneratorSheet(
+        nominal_density=p.retina_density)
+
+
+    Further information:
+
+    'context' is usually set to __main__.__dict__ and is used to find
+    the value of a parameter as it is add()ed to this object
+    (i.e. add() has access to values set via the commandline or in
+    scripts).
+
+    Values set via set_in_context() or exec_in_context() (used by -p)
+    are tracked: warnings are issued for overwritten values, and
+    unused values can be warned about via check_for_unused_names().
+
+    The context is not saved in snapshots, but parameter values are
+    saved.
+    """
+    context = None
+
+    def __new__(cls,*args,**kw):
+        return OptionalSingleton.__new__(cls,True)
+
+    def __init__(self,context=None,**params):
+        self.context = context or {}
+        self.unused_names = set()
+        params['name']="global_params"
+        super(GlobalParams,self).__init__(**params)
+
+    def __getstate__(self):
+        # context is neither saved nor restored
+        # (in our current usage, the context of the GlobalParams
+        # instance will be set to __main__.__dict__ on startup).
+        state = super(GlobalParams,self).__getstate__()
+        del state['context']
+        return state
+
+    def set_in_context(self,**params):
+        """
+        Set in self.context all name=val pairs specified in **params,
+        tracking new names and warning of any replacements.
+        """
+        for name,val in params.items():
+            if name in self.context:
+                self.warning("Replacing previous value of '%s' with '%s'"%(name,val))
+            self.context[name]=val
+            self.unused_names.add(name)
+
+    def exec_in_context(self,arg):
+        """
+        exec arg in self.context, tracking new names and
+        warning of any replacements.
+        """
+        ## contains elaborate scheme to detect what is specified by
+        ## -s, and to warn about any replacement
+        current_ids = dict([(k,id(v)) for k,v in self.context.items()])
+
+        exec arg in self.context
+
+        for k,v in self.context.items():
+            if k in self.unused_names and id(v)!=current_ids[k]:
+                self.warning("Replacing previous value of '%s' with '%s'"%(k,v))
+
+        new_names = set(self.context.keys()).difference(set(current_ids.keys()))
+        for k in new_names:
+            self.unused_names.add(k)
+
+    def check_for_unused_names(self):
+        """Warn about any unused names."""
+        for s in self.unused_names:
+            self.warning("'%s' is unused."%s)
+
+# warns for param that specified with -c (but also if name gets defined in __main__,
+# e.g. by default_density=global_params.default_density in a script file
+##         for name in self.params():
+##             if name in self.context:
+##                 self.warning("'%s' still exists in global_params.context"%name)
+
+        # detect duplicate param value that wasn't used (e.g. specified with after script)
+        for name,val in self.params().items():
+            if name in self.context:
+                if self.context[name]!=self.inspect_value(name):
+                    self.warning("'%s=%s' is unused."%(name,self.context[name]))
+
+
+    def add(self,**kw):
+        """
+        For each parameter_name=parameter_object specified in kw:
+        * adds the parameter_object to this object's class
+        * if there is an entry in context that has the same name as the parameter,
+          sets the value of the parameter in this object to that value, and then removes
+          the name from context
+        """
+        for p_name,p_obj in kw.items():
+            self._add_parameter(p_name,p_obj)
+            if p_name in self.context:
+                setattr(self,p_name,self.context[p_name])
+                if p_name in self.unused_names:
+                    # i.e. remove from __main__ if it was a -p option (but not if -c)
+                    del self.context[p_name]
+                    self.unused_names.remove(p_name)
+
+
+global_params=GlobalParams(context=__main__.__dict__)
