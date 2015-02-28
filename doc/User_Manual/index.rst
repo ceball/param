@@ -20,19 +20,6 @@ section.
  :maxdepth: 1
 
  introduction
- overview
- time
- coords
- Representing space in Topographica (coordinate systems) <space>
- scripts
- The Topographica command line and script language <commandline>
- batch
- Controlling simulation parameters <parameters>
- patterns
- plotting
- Graphical Model Editor <modeleditor>
- noise
- interfacing
- publishing
- multicore
+ basic
+ advanced
 
