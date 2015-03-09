@@ -801,21 +801,7 @@ def script_repr(val,imports,prefix,settings):
     The repr of a parameter can be suppressed by returning None from
     the appropriate hook in script_repr_reg.
     """
-    # CB: doc prefix & settings or realize they don't need to be
-    # passed around, etc.
-    if isinstance(val,type):
-        rep = type_script_repr(val,imports,prefix,settings)
-
-    elif type(val) in script_repr_reg:
-        rep = script_repr_reg[type(val)](val,imports,prefix,settings)
-
-    elif hasattr(val,'script_repr'):
-        rep=val.script_repr(imports=imports,prefix=prefix+"    ")
-
-    else:
-        rep=repr(val)
-
-    return rep
+    return pprint(val,imports,prefix,settings,unknown_value=None)
 
 
 # CB: when removing script_repr, move its docstring here and improve,
@@ -847,12 +833,12 @@ def pprint(val,imports, prefix="\n    ", settings=[],
     if isinstance(val,type):
         rep = type_script_repr(val,imports,prefix,settings)
 
-    elif type(val) in pprint_reg:
-        rep = pprint_reg[type(val)](val,imports,prefix,settings)
-
     elif type(val) in script_repr_reg:
         rep = script_repr_reg[type(val)](val,imports,prefix,settings)
 
+    elif hasattr(val,'script_repr'):
+        rep=val.script_repr(imports, prefix+"    ")
+        
     elif hasattr(val,'pprint'):
         rep=val.pprint(imports=imports, prefix=prefix+"    ",
                        qualify=qualify, unknown_value=unknown_value)
@@ -865,32 +851,10 @@ def pprint(val,imports, prefix="\n    ", settings=[],
 
 #: see script_repr()
 script_repr_reg = {}
-# CEBALERT: when replacing script_repr with pprint, remove
-# duplicated reg entries
-pprint_reg = {}
 
 
 # currently only handles list and tuple
 def container_script_repr(container,imports,prefix,settings):
-    result=[]
-    for i in container:
-        result.append(script_repr(i,imports,prefix,settings))
-
-    ## (hack to get container brackets)
-    if isinstance(container,list):
-        d1,d2='[',']'
-    elif isinstance(container,tuple):
-        d1,d2='(',')'
-    else:
-        raise NotImplementedError
-    rep=d1+','.join(result)+d2
-
-    # no imports to add for built-in types
-
-    return rep
-
-# CEBALERT: duplicates container_script_repr
-def container_pprint(container,imports,prefix,settings):
     result=[]
     for i in container:
         result.append(pprint(i,imports,prefix,settings))
@@ -924,23 +888,29 @@ except ImportError:
     pass # Support added only if those libraries are available
 
 
+def _add_to_imports(thing,imports):
+    # CEBALERT: support old script_repr interface for now
+    if isinstance(imports,list):
+        imports.append(thing)
+    else:
+        imports.add(thing)
+    
+    
 # why I have to type prefix and settings?
 def function_script_repr(fn,imports,prefix,settings):
     name = fn.__name__
     module = fn.__module__
-    imports.append('import %s'%module)
+    _add_to_imports('import %s'%module,imports)
     return module+'.'+name
 
 def type_script_repr(type_,imports,prefix,settings):
     module = type_.__module__
     if module!='__builtin__':
-        imports.append('import %s'%module)
+        _add_to_imports('import %s'%module,imports)
     return module+'.'+type_.__name__
 
 script_repr_reg[list]=container_script_repr
-pprint_reg[list]=container_pprint
 script_repr_reg[tuple]=container_script_repr
-pprint_reg[tuple]=container_pprint
 script_repr_reg[FunctionType]=function_script_repr
 
 
@@ -1221,34 +1191,10 @@ class Parameterized(object):
         """
         Variant of __repr__ designed for generating a runnable script.
         """
-        # Suppresses automatically generated names.
-        settings=[]
-        for name,val in self.get_param_values(onlychanged=script_repr_suppress_defaults):
-            if name == 'name' and (val is not None and
-                                   re.match('^'+self.__class__.__name__+'[0-9]+$',val)):
-                rep=None
-            else:
-                rep=script_repr(val,imports,prefix,settings)
-
-            if rep is not None:
-                settings.append('%s=%s' % (name,rep))
+        return self.pprint(imports,prefix, unknown_value=None, qualify=True, hacknline='\n')
 
 
-        # Generate import statement
-        mod = self.__module__
-
-        bits = mod.split('.')
-
-        imports.append("import %s"%mod)
-        imports.append("import %s"%bits[0])
-
-        # CB: Doesn't give a nice repr, but I don't see what to do
-        # otherwise that will work in all cases. Also I haven't
-        # updated this code in other places (e.g. simulation).
-        return mod+'.'+self.__class__.__name__ + "(" + (",\n"+prefix).join(settings) + ")"
-
-
-    def pprint(self, imports=[], prefix=" ", unknown_value='<?>', qualify=False):
+    def pprint(self, imports=set(), prefix=" ", unknown_value='<?>', qualify=False, hacknline=''):
         """
         (Experimental) Pretty printed representation that may be
         evaluated with eval. Similar to repr except introspection of the
@@ -1265,8 +1211,8 @@ class Parameterized(object):
         # Generate import statement
         mod = self.__module__
         bits = mod.split('.')
-        imports.append("import %s"%mod)
-        imports.append("import %s"%bits[0])
+        _add_to_imports('import %s'%mod,imports)
+        _add_to_imports('import %s'%bits[0],imports)
 
         changed_params = dict(self.get_param_values(onlychanged=script_repr_suppress_defaults))
         param_values = dict(self.get_param_values())
@@ -1300,8 +1246,10 @@ class Parameterized(object):
                            unknown_value=unknown_value,
                            qualify=qualify) if k in values else unknown_value
             if value is None:
-                raise Exception("Argument %r is not a parameter "
-                                "and has an unknown value." % k)
+                if unknown_value is None:
+                    continue
+                else:
+                    raise Exception("%r's value could not be represented" % k)
 
             # Explicit kwarg (unchanged, known value)
             if (k in kwargs) and (k in values) and kwargs[k] == values[k]: continue
@@ -1318,7 +1266,7 @@ class Parameterized(object):
 
         qualifier = mod + '.'  if qualify else ''
         arguments = arglist + keywords + (['**%s' % spec.varargs] if spec.varargs else [])
-        return qualifier + '%s(%s)' % (self.__class__.__name__,  (','+prefix).join(arguments))
+        return qualifier + '%s(%s)' % (self.__class__.__name__,  (','+hacknline+prefix).join(arguments))
 
 
     def __str__(self):
@@ -1880,12 +1828,10 @@ class ParameterizedFunction(Parameterized):
         Same as Parameterized.script_repr, except that X.classname(Y
         is replaced with X.classname.instance(Y
         """
-        r = Parameterized.script_repr(self,imports,prefix)
-        classname=self.__class__.__name__
-        return r.replace(".%s("%classname,".%s.instance("%classname)
+        return self.pprint(imports,prefix,unknown_value='', qualify=True)
 
 
-    def pprint(self, imports=[], prefix="\n    ", settings=[],
+    def pprint(self, imports=set(), prefix="\n    ", settings=[],
                unknown_value='<?>', qualify=True):
         """
         Same as Parameterized.pprint, except that X.classname(Y
